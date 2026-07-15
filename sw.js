@@ -1,4 +1,4 @@
-const CACHE_NAME = 'warehouse-v3';
+const CACHE_NAME = 'warehouse-v4';
 const ASSETS = ['./', './index.html', './style.css', './app.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', event => {
