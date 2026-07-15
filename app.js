@@ -64,7 +64,6 @@ function persistLocal() {
   DB.save(DB.SIZES,     state.sizes);
   DB.save(DB.GOALS,     state.goals);
   DB.save(DB.STREAKS,   state.streaks);
-  console.log('✅ Local data saved:', state.entries.length, 'entries');
 }
 
 // ─── SYNC INDICATOR ─────────────────────────
@@ -83,19 +82,11 @@ setSyncStatus(navigator.onLine ? 'online' : 'offline');
 async function fbSaveEntry(entry) {
   setSyncStatus('syncing');
   try {
-    console.log('📤 Saving entry to Firebase:', entry);
-    const docRef = doc(db, COL_ENTRIES, entry.id);
-    await setDoc(docRef, entry);
+    await setDoc(doc(db, COL_ENTRIES, entry.id), entry);
     setSyncStatus('online');
-    console.log('✅ Entry saved to Firebase');
-    return true;
   } catch(e) {
-    console.error('❌ Firebase save error:', e);
+    console.warn('Firebase save error:', e);
     setSyncStatus('offline');
-    // Сохраняем локально, если Firebase не работает
-    state.entries = [entry, ...state.entries.filter(e => e.id !== entry.id)];
-    persistLocal();
-    return false;
   }
 }
 
@@ -104,13 +95,9 @@ async function fbDeleteEntry(id) {
   try {
     await deleteDoc(doc(db, COL_ENTRIES, id));
     setSyncStatus('online');
-    console.log('✅ Entry deleted from Firebase');
   } catch(e) {
     console.warn('Firebase delete error:', e);
     setSyncStatus('offline');
-    // Удаляем локально
-    state.entries = state.entries.filter(e => e.id !== id);
-    persistLocal();
   }
 }
 
@@ -118,7 +105,6 @@ async function fbDeleteEntry(id) {
 async function fbSaveSettings() {
   setSyncStatus('syncing');
   try {
-    console.log('📤 Saving settings to Firebase...');
     await setDoc(doc(db, COL_SETTINGS, 'main'), {
       employees: state.employees,
       models:    state.models,
@@ -129,7 +115,6 @@ async function fbSaveSettings() {
       updatedAt: new Date().toISOString()
     });
     setSyncStatus('online');
-    console.log('✅ Settings saved to Firebase');
   } catch(e) {
     console.warn('Firebase settings save error:', e);
     setSyncStatus('offline');
@@ -138,12 +123,9 @@ async function fbSaveSettings() {
 
 // ─── FIREBASE: слушать записи в реальном времени ──
 function subscribeEntries() {
-  console.log('🔄 Subscribing to entries...');
   const q = query(collection(db, COL_ENTRIES), orderBy('createdAt', 'desc'));
   onSnapshot(q, snapshot => {
-    const newEntries = snapshot.docs.map(d => d.data());
-    console.log('📥 Received entries from Firebase:', newEntries.length);
-    state.entries = newEntries;
+    state.entries = snapshot.docs.map(d => d.data());
     persistLocal();
     updateTopbar();
     updateTop3Widget();
@@ -151,25 +133,19 @@ function subscribeEntries() {
     if (state.currentTab === 'history')    renderHistory();
     if (state.currentTab === 'stats')      renderStats();
     if (state.currentTab === 'motivation') renderMotivation();
+    if (state.currentTab === 'report')     renderReport();
     setSyncStatus('online');
   }, err => {
-    console.error('❌ Snapshot error:', err);
+    console.warn('Snapshot error:', err);
     setSyncStatus('offline');
   });
 }
 
 // ─── FIREBASE: слушать настройки ────────────
 function subscribeSettings() {
-  console.log('🔄 Subscribing to settings...');
   onSnapshot(doc(db, COL_SETTINGS, 'main'), snap => {
-    if (!snap.exists()) {
-      console.log('ℹ️ No settings in Firebase yet');
-      // Создаем начальные настройки
-      fbSaveSettings();
-      return;
-    }
+    if (!snap.exists()) return;
     const data = snap.data();
-    console.log('📥 Received settings from Firebase');
     // Мержим — не перезаписываем полностью чтобы не потерять локальные изменения
     if (data.employees) state.employees = data.employees;
     if (data.models)    state.models    = data.models;
@@ -293,6 +269,7 @@ function switchTab(name) {
   if (name === 'history')    renderHistory();
   if (name === 'stats')      renderStats();
   if (name === 'motivation') renderMotivation();
+  if (name === 'report')     renderReport();
   if (name === 'settings')   renderSettings();
   updateTopbar();
 }
@@ -329,7 +306,6 @@ document.getElementById('modal-input').addEventListener('keydown', e => {
 // ─── ADD FORM ────────────────────────────────
 function buildSelect(id, items, placeholder='— выберите —') {
   const sel = document.getElementById(id);
-  if (!sel) return;
   const cur = sel.value;
   sel.innerHTML = `<option value="">${placeholder}</option>`;
   items.forEach(v => sel.insertAdjacentHTML('beforeend',
@@ -338,7 +314,6 @@ function buildSelect(id, items, placeholder='— выберите —') {
 function buildQuickBtns(containerId, items, inputId) {
   const c = document.getElementById(containerId);
   const inp = document.getElementById(inputId);
-  if (!c || !inp) return;
   c.innerHTML = '';
   items.forEach(v => {
     const b = document.createElement('button');
@@ -355,16 +330,16 @@ function refreshAddForm() {
 }
 refreshAddForm();
 
-document.getElementById('f-employee')?.addEventListener('change', () => {
+document.getElementById('f-employee').addEventListener('change', () => {
   updateEmployeeWidget();
   updateGoalProgress();
   updateTop3Widget();
 });
 
 function updateEmployeeWidget() {
-  const emp = document.getElementById('f-employee')?.value;
+  const emp = document.getElementById('f-employee').value;
   const widget = document.getElementById('employee-widget');
-  if (!emp || !widget) { if (widget) widget.classList.add('hidden'); return; }
+  if (!emp) { widget.classList.add('hidden'); return; }
   const total  = empTotalQty(emp);
   const level  = getLevel(total);
   const streak = getStreak(emp);
@@ -388,9 +363,9 @@ function updateEmployeeWidget() {
 }
 
 function updateGoalProgress() {
-  const emp  = document.getElementById('f-employee')?.value;
+  const emp  = document.getElementById('f-employee').value;
   const wrap = document.getElementById('goal-progress-wrap');
-  if (!emp || !state.goals[emp] || !wrap) { if (wrap) wrap.classList.add('hidden'); return; }
+  if (!emp || !state.goals[emp]) { wrap.classList.add('hidden'); return; }
   const goal = Number(state.goals[emp]);
   const done = todayQtyForEmployee(emp);
   const pct  = Math.min(100, Math.round(done/goal*100));
@@ -409,7 +384,7 @@ function updateTop3Widget() {
   const todayEntries = state.entries.filter(e => new Date(e.createdAt) >= today);
   const top = groupSum(todayEntries, e => e.employee).slice(0,3);
   const widget = document.getElementById('top3-widget');
-  if (!top.length || !widget) { if (widget) widget.classList.add('hidden'); return; }
+  if (!top.length) { widget.classList.add('hidden'); return; }
   const max = top[0][1];
   const colors = ['#ffd700','#c0c0c0','#cd7f32'];
   const ranks  = ['🥇','🥈','🥉'];
@@ -427,7 +402,7 @@ function updateTop3Widget() {
     </div>`;
 }
 
-document.getElementById('btn-add-employee')?.addEventListener('click', async () => {
+document.getElementById('btn-add-employee').addEventListener('click', async () => {
   const v = await openModal('Новый сотрудник', 'Имя сотрудника');
   if (v && !state.employees.includes(v)) {
     state.employees.push(v);
@@ -437,7 +412,7 @@ document.getElementById('btn-add-employee')?.addEventListener('click', async () 
   }
 });
 
-document.getElementById('btn-add-model')?.addEventListener('click', async () => {
+document.getElementById('btn-add-model').addEventListener('click', async () => {
   const v = await openModal('Новая модель', 'Название модели');
   if (v && !state.models.includes(v)) {
     state.models.push(v);
@@ -446,17 +421,13 @@ document.getElementById('btn-add-model')?.addEventListener('click', async () => 
   }
 });
 
-document.getElementById('btn-save')?.addEventListener('click', async () => {
-  console.log('🔵 Save button clicked');
-  
+document.getElementById('btn-save').addEventListener('click', async () => {
   const employee = document.getElementById('f-employee').value.trim();
   const model    = document.getElementById('f-model').value.trim();
   const color    = document.getElementById('f-color').value.trim();
   const size     = normalizeSize(document.getElementById('f-size').value);
   const quantity = parseInt(document.getElementById('f-qty').value, 10);
   const note     = document.getElementById('f-note').value.trim();
-
-  console.log('📝 Form data:', { employee, model, color, size, quantity, note });
 
   if (!employee) { showToast('Выберите сотрудника'); return; }
   if (!model)    { showToast('Выберите модель');     return; }
@@ -465,34 +436,13 @@ document.getElementById('btn-save')?.addEventListener('click', async () => {
 
   const goalBefore = state.goals[employee] ? todayQtyForEmployee(employee) : null;
 
-  const entry = { 
-    id: genId(), 
-    createdAt: new Date().toISOString(), 
-    employee, 
-    model, 
-    color, 
-    size, 
-    quantity, 
-    note 
-  };
-  console.log('📦 New entry:', entry);
+  const entry = { id:genId(), createdAt:new Date().toISOString(), employee, model, color, size, quantity, note };
 
   updateStreak(employee);
   persistLocal();
 
-  // Сохраняем в Firebase
-  const saved = await fbSaveEntry(entry);
-  if (saved) {
-    // Если сохранено в Firebase, onSnapshot обновит state.entries
-    // Но для надежности добавим локально
-    state.entries = [entry, ...state.entries.filter(e => e.id !== entry.id)];
-    persistLocal();
-  } else {
-    // Если Firebase не доступен, уже сохранено локально
-    state.entries = [entry, ...state.entries.filter(e => e.id !== entry.id)];
-    persistLocal();
-  }
-  
+  // Сохраняем в Firebase (onSnapshot автоматически обновит state.entries)
+  await fbSaveEntry(entry);
   await fbSaveSettings();
 
   const msgs = ['✓ Сохранено! Отличная работа!','✓ Записано! Так держать!','✓ Готово! Продолжай в том же духе!','✓ Супер! Ещё один шаг к цели!'];
@@ -512,25 +462,17 @@ document.getElementById('btn-save')?.addEventListener('click', async () => {
   updateEmployeeWidget();
   updateGoalProgress();
   updateTop3Widget();
-  updateTopbar();
 });
 
-document.getElementById('btn-clear')?.addEventListener('click', () => {
-  ['f-employee','f-model','f-color','f-size','f-qty','f-note'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.value = '';
-  });
-  const widget = document.getElementById('employee-widget');
-  if (widget) widget.classList.add('hidden');
-  const wrap = document.getElementById('goal-progress-wrap');
-  if (wrap) wrap.classList.add('hidden');
-  const top3 = document.getElementById('top3-widget');
-  if (top3) top3.classList.add('hidden');
+document.getElementById('btn-clear').addEventListener('click', () => {
+  ['f-employee','f-model','f-color','f-size','f-qty','f-note'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('employee-widget').classList.add('hidden');
+  document.getElementById('goal-progress-wrap').classList.add('hidden');
+  document.getElementById('top3-widget').classList.add('hidden');
 });
 
 function showToast(msg) {
   const area = document.getElementById('toast');
-  if (!area) return;
   area.innerHTML = '';
   const t = document.createElement('div');
   t.className = 'toast'; t.textContent = msg;
@@ -551,7 +493,6 @@ function showGoalDone(emp) {
 // ─── CONFETTI ────────────────────────────────
 function launchConfetti() {
   const canvas = document.getElementById('confetti-canvas');
-  if (!canvas) return;
   const ctx = canvas.getContext('2d');
   canvas.width = window.innerWidth; canvas.height = window.innerHeight;
   const pieces = [];
@@ -604,8 +545,6 @@ function renderHistory() {
   const empSel   = document.getElementById('h-filter-emp');
   const modelSel = document.getElementById('h-filter-model');
   const sizeSel  = document.getElementById('h-filter-size');
-  if (!empSel || !modelSel || !sizeSel) return;
-  
   const curEmp = empSel.value, curModel = modelSel.value, curSize = sizeSel.value;
 
   empSel.innerHTML   = '<option value="">Все сотрудники</option>';
@@ -623,19 +562,15 @@ function renderHistory() {
   const uniqMod  = new Set(list.map(e => e.model)).size;
   const uniqSize = new Set(list.map(e => normalizeSize(e.size))).size;
 
-  const summary = document.getElementById('history-summary');
-  if (summary) {
-    summary.innerHTML = `
-      <div class="summary-card"><div class="summary-val">${list.length}</div><div class="summary-label">Записей</div></div>
-      <div class="summary-card"><div class="summary-val">${qty}</div><div class="summary-label">Всего шт</div></div>
-      <div class="summary-card"><div class="summary-val">${uniqEmp}</div><div class="summary-label">Сотрудн.</div></div>
-      <div class="summary-card"><div class="summary-val">${uniqMod}</div><div class="summary-label">Моделей</div></div>
-      <div class="summary-card"><div class="summary-val">${uniqSize}</div><div class="summary-label">Размеров</div></div>
-      <div class="summary-card"><div class="summary-val">${list.length?Math.round(qty/list.length):0}</div><div class="summary-label">Ср./запись</div></div>`;
-  }
+  document.getElementById('history-summary').innerHTML = `
+    <div class="summary-card"><div class="summary-val">${list.length}</div><div class="summary-label">Записей</div></div>
+    <div class="summary-card"><div class="summary-val">${qty}</div><div class="summary-label">Всего шт</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqEmp}</div><div class="summary-label">Сотрудн.</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqMod}</div><div class="summary-label">Моделей</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqSize}</div><div class="summary-label">Размеров</div></div>
+    <div class="summary-card"><div class="summary-val">${list.length?Math.round(qty/list.length):0}</div><div class="summary-label">Ср./запись</div></div>`;
 
   const container = document.getElementById('history-list');
-  if (!container) return;
   if (!list.length) {
     container.innerHTML = `<div class="empty-state"><span class="empty-icon">📭</span>Нет записей</div>`;
     return;
@@ -667,33 +602,33 @@ function renderHistory() {
   });
 }
 
-document.getElementById('h-search')?.addEventListener('input',        e => { state.historyFilters.search   = e.target.value; renderHistory(); });
-document.getElementById('h-filter-emp')?.addEventListener('change',   e => { state.historyFilters.employee = e.target.value; renderHistory(); });
-document.getElementById('h-filter-model')?.addEventListener('change', e => { state.historyFilters.model    = e.target.value; renderHistory(); });
-document.getElementById('h-filter-size')?.addEventListener('change',  e => { state.historyFilters.size     = e.target.value; renderHistory(); });
-document.getElementById('h-date-from')?.addEventListener('change',    e => { state.historyFilters.from     = e.target.value; renderHistory(); });
-document.getElementById('h-date-to')?.addEventListener('change',      e => { state.historyFilters.to       = e.target.value; renderHistory(); });
-document.getElementById('btn-reset-filters')?.addEventListener('click', () => {
+document.getElementById('h-search').addEventListener('input',        e => { state.historyFilters.search   = e.target.value; renderHistory(); });
+document.getElementById('h-filter-emp').addEventListener('change',   e => { state.historyFilters.employee = e.target.value; renderHistory(); });
+document.getElementById('h-filter-model').addEventListener('change', e => { state.historyFilters.model    = e.target.value; renderHistory(); });
+document.getElementById('h-filter-size').addEventListener('change',  e => { state.historyFilters.size     = e.target.value; renderHistory(); });
+document.getElementById('h-date-from').addEventListener('change',    e => { state.historyFilters.from     = e.target.value; renderHistory(); });
+document.getElementById('h-date-to').addEventListener('change',      e => { state.historyFilters.to       = e.target.value; renderHistory(); });
+document.getElementById('btn-reset-filters').addEventListener('click', () => {
   state.historyFilters = { search:'', employee:'', model:'', size:'', from:'', to:'' };
   ['h-search','h-filter-emp','h-filter-model','h-filter-size','h-date-from','h-date-to']
-    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    .forEach(id => document.getElementById(id).value = '');
   renderHistory();
 });
 
 // ─── EXPORT / IMPORT ─────────────────────────
-document.getElementById('btn-export-csv')?.addEventListener('click', () => {
+document.getElementById('btn-export-csv').addEventListener('click', () => {
   const list = filteredEntries();
   const rows = [['ID','Дата','Сотрудник','Модель','Цвет','Размер','Количество','Комментарий']];
   list.forEach(e => rows.push([e.id,e.createdAt,e.employee,e.model,e.color,e.size,e.quantity,e.note]));
   const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   downloadFile('warehouse-export.csv', csv, 'text/csv');
 });
-document.getElementById('btn-export-json')?.addEventListener('click', () => {
+document.getElementById('btn-export-json').addEventListener('click', () => {
   downloadFile('warehouse-backup.json',
     JSON.stringify({ entries:state.entries, employees:state.employees, models:state.models,
       colors:state.colors, sizes:state.sizes, goals:state.goals }, null, 2), 'application/json');
 });
-document.getElementById('import-json')?.addEventListener('change', e => {
+document.getElementById('import-json').addEventListener('change', e => {
   const file = e.target.files[0]; if (!file) return;
   const reader = new FileReader();
   reader.onload = async ev => {
@@ -729,7 +664,6 @@ function downloadFile(name, content, type) {
 function renderStats() {
   const entries = periodFilter(state.entries, state.currentPeriod);
   const container = document.getElementById('stats-content');
-  if (!container) return;
   if (!entries.length) {
     container.innerHTML = `<div class="empty-state"><span class="empty-icon">📊</span>Нет данных за выбранный период</div>`;
     return;
@@ -818,7 +752,6 @@ document.querySelectorAll('.period-btn').forEach(btn => {
 // ─── MOTIVATION ──────────────────────────────
 function renderMotivation() {
   const container = document.getElementById('motivation-content');
-  if (!container) return;
   if (!state.employees.length) {
     container.innerHTML = `<div class="empty-state"><span class="empty-icon">🏆</span>Добавьте сотрудников в настройках</div>`;
     return;
@@ -923,6 +856,136 @@ function renderMotivation() {
   container.innerHTML = podiumHtml + lbHtml + goalsHtml + recordsHtml + badgesHtml;
 }
 
+// ─── REPORT ──────────────────────────────────
+const DAYS_OF_WEEK = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+let reportFilters = { employee:'', model:'', from:'', to:'' };
+
+function reportFilteredEntries() {
+  let list = [...state.entries];
+  if (reportFilters.employee) list = list.filter(e => e.employee === reportFilters.employee);
+  if (reportFilters.model)    list = list.filter(e => e.model    === reportFilters.model);
+  if (reportFilters.from) { const f=new Date(reportFilters.from).getTime(); list=list.filter(e=>new Date(e.createdAt).getTime()>=f); }
+  if (reportFilters.to)   { const t=new Date(reportFilters.to).getTime()+86400000; list=list.filter(e=>new Date(e.createdAt).getTime()<t); }
+  return list;
+}
+
+function renderReport() {
+  const empSel   = document.getElementById('r-filter-emp');
+  const modelSel = document.getElementById('r-filter-model');
+  const curEmp = empSel.value, curModel = modelSel.value;
+  empSel.innerHTML   = '<option value="">Все сотрудники</option>';
+  modelSel.innerHTML = '<option value="">Все модели</option>';
+  state.employees.forEach(v => empSel.insertAdjacentHTML('beforeend',   `<option value="${esc(v)}">${esc(v)}</option>`));
+  state.models.forEach(v    => modelSel.insertAdjacentHTML('beforeend', `<option value="${esc(v)}">${esc(v)}</option>`));
+  empSel.value = curEmp; modelSel.value = curModel;
+
+  const list = reportFilteredEntries();
+  const totalQ   = totalQty(list);
+  const uniqDays = new Set(list.map(e => e.createdAt.slice(0,10))).size;
+  const uniqEmps = new Set(list.map(e => e.employee)).size;
+
+  document.getElementById('report-summary').innerHTML = `
+    <div class="summary-card"><div class="summary-val">${uniqDays}</div><div class="summary-label">Дней</div></div>
+    <div class="summary-card"><div class="summary-val">${totalQ}</div><div class="summary-label">Всего шт</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqEmps}</div><div class="summary-label">Сотрудн.</div></div>
+    <div class="summary-card"><div class="summary-val">${list.length}</div><div class="summary-label">Записей</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqDays?Math.round(totalQ/uniqDays):0}</div><div class="summary-label">Ср./день</div></div>
+    <div class="summary-card"><div class="summary-val">${list.length?Math.round(totalQ/list.length):0}</div><div class="summary-label">Ср./запись</div></div>`;
+
+  const container = document.getElementById('report-days-list');
+  if (!list.length) {
+    container.innerHTML = `<div class="empty-state"><span class="empty-icon">📅</span>Нет данных за выбранный период</div>`;
+    return;
+  }
+
+  const byDate = new Map();
+  for (const entry of list) {
+    const day = entry.createdAt.slice(0,10);
+    if (!byDate.has(day)) byDate.set(day, []);
+    byDate.get(day).push(entry);
+  }
+  const sortedDates = [...byDate.keys()].sort((a,b) => b.localeCompare(a));
+
+  container.innerHTML = sortedDates.map(date => {
+    const dayEntries = byDate.get(date);
+    const dayTotal   = totalQty(dayEntries);
+    const dayDate    = new Date(date+'T00:00:00');
+    const dow        = DAYS_OF_WEEK[dayDate.getDay()];
+    const dateLabel  = dayDate.toLocaleDateString('ru', { day:'2-digit', month:'long' });
+    const uniqEmpsDay = new Set(dayEntries.map(e => e.employee)).size;
+
+    const byEmp = new Map();
+    for (const entry of dayEntries) {
+      if (!byEmp.has(entry.employee)) byEmp.set(entry.employee, []);
+      byEmp.get(entry.employee).push(entry);
+    }
+    const sortedEmps = [...byEmp.entries()].sort((a,b) => totalQty(b[1])-totalQty(a[1]));
+
+    const empSections = sortedEmps.map(([empName, empEntries]) => {
+      const empTotal = totalQty(empEntries);
+      const byModel = new Map();
+      for (const entry of empEntries) {
+        if (!byModel.has(entry.model)) byModel.set(entry.model, []);
+        byModel.get(entry.model).push(entry);
+      }
+      const modelRows = [...byModel.entries()].map(([modelName, modelEntries]) => {
+        const sizeMap = groupSum(modelEntries, e => normalizeSize(e.size));
+        return `<div class="report-model-row">
+          <span class="report-model-name">${esc(modelName)}</span>
+          <div class="report-model-sizes">
+            ${sizeMap.map(([sz,qt]) => `
+              <div class="report-size-tag">
+                <span class="report-size-tag-size">${esc(sz)}</span>
+                <span class="report-size-tag-qty">×${qt}</span>
+              </div>`).join('')}
+          </div>
+        </div>`;
+      }).join('');
+      return `<div class="report-emp-section">
+        <div class="report-emp-header">
+          <div class="report-emp-name">${getLevel(empTotalQty(empName)).emoji} ${esc(empName)}</div>
+          <div class="report-emp-qty">${empTotal} шт</div>
+        </div>
+        ${modelRows}
+      </div>`;
+    }).join('');
+
+    return `<div class="report-day-block" data-date="${date}">
+      <div class="report-day-header">
+        <div class="report-day-title"><span>${dateLabel}</span><span class="report-day-dow">${dow}</span></div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div><div class="report-day-total">${dayTotal} шт</div><div class="report-day-meta">${uniqEmpsDay} сотр · ${dayEntries.length} зап</div></div>
+          <span class="report-day-chevron">▼</span>
+        </div>
+      </div>
+      <div class="report-day-body">${empSections}</div>
+    </div>`;
+  }).join('');
+
+  container.querySelectorAll('.report-day-header').forEach(header => {
+    header.addEventListener('click', () => header.closest('.report-day-block').classList.toggle('open'));
+  });
+  const todayBlock = container.querySelector(`[data-date="${todayStr()}"]`);
+  if (todayBlock) todayBlock.classList.add('open');
+}
+
+document.getElementById('r-filter-emp').addEventListener('change',   e => { reportFilters.employee = e.target.value; renderReport(); });
+document.getElementById('r-filter-model').addEventListener('change', e => { reportFilters.model    = e.target.value; renderReport(); });
+document.getElementById('r-date-from').addEventListener('change',    e => { reportFilters.from     = e.target.value; renderReport(); });
+document.getElementById('r-date-to').addEventListener('change',      e => { reportFilters.to       = e.target.value; renderReport(); });
+document.getElementById('btn-reset-report').addEventListener('click', () => {
+  reportFilters = { employee:'', model:'', from:'', to:'' };
+  ['r-filter-emp','r-filter-model','r-date-from','r-date-to'].forEach(id => document.getElementById(id).value = '');
+  renderReport();
+});
+document.getElementById('btn-export-report-csv').addEventListener('click', () => {
+  const list = reportFilteredEntries();
+  const rows = [['Дата','День недели','Сотрудник','Модель','Цвет','Размер','Количество','Комментарий']];
+  list.forEach(e => { const d=new Date(e.createdAt); rows.push([e.createdAt.slice(0,10),DAYS_OF_WEEK[d.getDay()],e.employee,e.model,e.color,e.size,e.quantity,e.note]); });
+  const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  downloadFile('report-by-days.csv', csv, 'text/csv');
+});
+
 // ─── SETTINGS ────────────────────────────────
 function renderSettings() {
   renderTagEditor('colors-editor',    state.colors,    'colors');
@@ -933,7 +996,6 @@ function renderSettings() {
 }
 function renderTagEditor(containerId, arr, key) {
   const c = document.getElementById(containerId);
-  if (!c) return;
   c.innerHTML = arr.map((v,i) => `
     <div class="tag-item"><span>${esc(v)}</span>
       <button class="tag-remove" data-key="${key}" data-idx="${i}">×</button>
@@ -948,7 +1010,6 @@ function renderTagEditor(containerId, arr, key) {
 }
 function renderGoalsEditor() {
   const c = document.getElementById('goals-editor');
-  if (!c) return;
   if (!state.employees.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px">Сначала добавьте сотрудников</div>'; return; }
   c.innerHTML = state.employees.map(emp => `
     <div class="goal-row">
@@ -966,7 +1027,6 @@ function renderGoalsEditor() {
 }
 function addTagFromInput(inputId, stateKey, editorId) {
   const inp = document.getElementById(inputId);
-  if (!inp) return;
   const v = inp.value.trim(); if (!v) return;
   if (!state[stateKey].includes(v)) {
     state[stateKey].push(v); persistLocal(); fbSaveSettings(); refreshAddForm();
@@ -975,19 +1035,19 @@ function addTagFromInput(inputId, stateKey, editorId) {
   }
   inp.value = '';
 }
-document.getElementById('btn-add-color')?.addEventListener('click',      () => addTagFromInput('new-color','colors','colors-editor'));
-document.getElementById('btn-add-size')?.addEventListener('click',       () => addTagFromInput('new-size','sizes','sizes-editor'));
-document.getElementById('btn-add-employee-s')?.addEventListener('click', () => addTagFromInput('new-employee','employees','employees-editor'));
-document.getElementById('btn-add-model-s')?.addEventListener('click',    () => addTagFromInput('new-model','models','models-editor'));
+document.getElementById('btn-add-color').addEventListener('click',      () => addTagFromInput('new-color','colors','colors-editor'));
+document.getElementById('btn-add-size').addEventListener('click',       () => addTagFromInput('new-size','sizes','sizes-editor'));
+document.getElementById('btn-add-employee-s').addEventListener('click', () => addTagFromInput('new-employee','employees','employees-editor'));
+document.getElementById('btn-add-model-s').addEventListener('click',    () => addTagFromInput('new-model','models','models-editor'));
 ['new-color','new-size','new-employee','new-model'].forEach(id => {
-  document.getElementById(id)?.addEventListener('keydown', e => {
+  document.getElementById(id).addEventListener('keydown', e => {
     if (e.key!=='Enter') return;
     const map = { 'new-color':['colors','colors-editor'], 'new-size':['sizes','sizes-editor'],
       'new-employee':['employees','employees-editor'], 'new-model':['models','models-editor'] };
     const [k,editor] = map[id]; addTagFromInput(id,k,editor);
   });
 });
-document.getElementById('btn-clear-all')?.addEventListener('click', async () => {
+document.getElementById('btn-clear-all').addEventListener('click', async () => {
   if (confirm(`Удалить ВСЕ ${state.entries.length} записей? Это необратимо.`)) {
     for (const e of state.entries) await fbDeleteEntry(e.id);
     showToast('Все записи удалены');
@@ -1006,11 +1066,11 @@ window.addEventListener('beforeinstallprompt', e => {
       <button class="banner-btn" id="banner-dismiss">✕</button>
     </div>`;
   document.body.appendChild(banner);
-  document.getElementById('banner-install')?.addEventListener('click', async () => {
+  document.getElementById('banner-install').addEventListener('click', async () => {
     deferredPrompt.prompt(); await deferredPrompt.userChoice;
     banner.remove(); deferredPrompt = null;
   });
-  document.getElementById('banner-dismiss')?.addEventListener('click', () => banner.remove());
+  document.getElementById('banner-dismiss').addEventListener('click', () => banner.remove());
 });
 
 if ('serviceWorker' in navigator) {
@@ -1018,7 +1078,6 @@ if ('serviceWorker' in navigator) {
 }
 
 // ─── INIT ─────────────────────────────────────
-console.log('🚀 App initialized');
 updateTopbar();
 updateTop3Widget();
 subscribeEntries();
