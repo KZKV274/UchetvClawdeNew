@@ -1,12 +1,32 @@
 'use strict';
 
 /* ═══════════════════════════════════════════
-   BRIDGE FULFILLMENT — app.js v2
-   Мотивация: уровни, стрики, бейджи, цели,
-   конфетти, лидерборд, рекорды
+   BRIDGE FULFILLMENT — app.js v3 (Firebase)
    ═══════════════════════════════════════════ */
 
-// ─── STORAGE ────────────────────────────────
+import { initializeApp }                          from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js';
+import { getFirestore, collection, doc, setDoc,
+         deleteDoc, onSnapshot, query,
+         orderBy, getDoc }                        from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
+
+// ─── FIREBASE CONFIG ────────────────────────
+const firebaseConfig = {
+  apiKey:            'AIzaSyChvQUtDrLL3HUVjMSTMSae3SXtpRqLApc',
+  authDomain:        'bridge-fulfillment.firebaseapp.com',
+  projectId:         'bridge-fulfillment',
+  storageBucket:     'bridge-fulfillment.firebasestorage.app',
+  messagingSenderId: '469977587624',
+  appId:             '1:469977587624:web:15b6ff70a2545ac649879d'
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const db    = getFirestore(fbApp);
+
+// Firestore collections
+const COL_ENTRIES  = 'entries';
+const COL_SETTINGS = 'settings';
+
+// ─── LOCAL STORAGE (кэш) ────────────────────
 const DB = {
   ENTRIES:   'wh_entries',
   EMPLOYEES: 'wh_employees',
@@ -25,18 +45,18 @@ const DB = {
 // ─── STATE ──────────────────────────────────
 const state = {
   entries:   DB.load(DB.ENTRIES,   []),
-  employees: DB.load(DB.EMPLOYEES, ['Алина', 'Борис', 'Светлана']),
-  models:    DB.load(DB.MODELS,    ['Модель А', 'Модель Б', 'Модель В']),
-  colors:    DB.load(DB.COLORS,    ['Чёрный', 'Белый', 'Синий', 'Красный', 'Серый']),
+  employees: DB.load(DB.EMPLOYEES, []),
+  models:    DB.load(DB.MODELS,    []),
+  colors:    DB.load(DB.COLORS,    ['Чёрный','Белый','Синий','Красный','Серый']),
   sizes:     DB.load(DB.SIZES,     ['XS','S','M','L','XL','XXL','40','42','44','46','48','50']),
-  goals:     DB.load(DB.GOALS,     {}),   // { employee: number }
-  streaks:   DB.load(DB.STREAKS,   {}),   // { employee: { count, lastDate } }
+  goals:     DB.load(DB.GOALS,     {}),
+  streaks:   DB.load(DB.STREAKS,   {}),
   currentTab:    'add',
   currentPeriod: 'today',
   historyFilters: { search:'', employee:'', model:'', size:'', from:'', to:'' }
 };
 
-function persist() {
+function persistLocal() {
   DB.save(DB.ENTRIES,   state.entries);
   DB.save(DB.EMPLOYEES, state.employees);
   DB.save(DB.MODELS,    state.models);
@@ -44,6 +64,100 @@ function persist() {
   DB.save(DB.SIZES,     state.sizes);
   DB.save(DB.GOALS,     state.goals);
   DB.save(DB.STREAKS,   state.streaks);
+}
+
+// ─── SYNC INDICATOR ─────────────────────────
+const syncEl = document.getElementById('sync-indicator');
+function setSyncStatus(status) {
+  if (!syncEl) return;
+  syncEl.className = 'sync-indicator ' + status;
+  syncEl.title = status === 'online' ? 'Синхронизировано' : status === 'syncing' ? 'Синхронизация...' : 'Офлайн';
+}
+
+window.addEventListener('online',  () => setSyncStatus('online'));
+window.addEventListener('offline', () => setSyncStatus('offline'));
+setSyncStatus(navigator.onLine ? 'online' : 'offline');
+
+// ─── FIREBASE: сохранить запись ─────────────
+async function fbSaveEntry(entry) {
+  setSyncStatus('syncing');
+  try {
+    await setDoc(doc(db, COL_ENTRIES, entry.id), entry);
+    setSyncStatus('online');
+  } catch(e) {
+    console.warn('Firebase save error:', e);
+    setSyncStatus('offline');
+  }
+}
+
+async function fbDeleteEntry(id) {
+  setSyncStatus('syncing');
+  try {
+    await deleteDoc(doc(db, COL_ENTRIES, id));
+    setSyncStatus('online');
+  } catch(e) {
+    console.warn('Firebase delete error:', e);
+    setSyncStatus('offline');
+  }
+}
+
+// ─── FIREBASE: сохранить настройки ──────────
+async function fbSaveSettings() {
+  setSyncStatus('syncing');
+  try {
+    await setDoc(doc(db, COL_SETTINGS, 'main'), {
+      employees: state.employees,
+      models:    state.models,
+      colors:    state.colors,
+      sizes:     state.sizes,
+      goals:     state.goals,
+      streaks:   state.streaks,
+      updatedAt: new Date().toISOString()
+    });
+    setSyncStatus('online');
+  } catch(e) {
+    console.warn('Firebase settings save error:', e);
+    setSyncStatus('offline');
+  }
+}
+
+// ─── FIREBASE: слушать записи в реальном времени ──
+function subscribeEntries() {
+  const q = query(collection(db, COL_ENTRIES), orderBy('createdAt', 'desc'));
+  onSnapshot(q, snapshot => {
+    state.entries = snapshot.docs.map(d => d.data());
+    persistLocal();
+    updateTopbar();
+    updateTop3Widget();
+    // Обновить активный экран
+    if (state.currentTab === 'history')    renderHistory();
+    if (state.currentTab === 'stats')      renderStats();
+    if (state.currentTab === 'motivation') renderMotivation();
+    if (state.currentTab === 'report')     renderReport();
+    setSyncStatus('online');
+  }, err => {
+    console.warn('Snapshot error:', err);
+    setSyncStatus('offline');
+  });
+}
+
+// ─── FIREBASE: слушать настройки ────────────
+function subscribeSettings() {
+  onSnapshot(doc(db, COL_SETTINGS, 'main'), snap => {
+    if (!snap.exists()) return;
+    const data = snap.data();
+    // Мержим — не перезаписываем полностью чтобы не потерять локальные изменения
+    if (data.employees) state.employees = data.employees;
+    if (data.models)    state.models    = data.models;
+    if (data.colors)    state.colors    = data.colors;
+    if (data.sizes)     state.sizes     = data.sizes;
+    if (data.goals)     state.goals     = data.goals;
+    if (data.streaks)   state.streaks   = data.streaks;
+    persistLocal();
+    refreshAddForm();
+    if (state.currentTab === 'settings')   renderSettings();
+    if (state.currentTab === 'motivation') renderMotivation();
+  });
 }
 
 // ─── HELPERS ────────────────────────────────
@@ -62,7 +176,6 @@ function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
-
 function groupSum(list, keyFn) {
   const map = new Map();
   for (const item of list) {
@@ -71,7 +184,6 @@ function groupSum(list, keyFn) {
   }
   return [...map.entries()].sort((a,b) => b[1]-a[1]);
 }
-
 function periodFilter(entries, period) {
   const now = new Date();
   const startOf = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -84,31 +196,26 @@ function periodFilter(entries, period) {
     return true;
   });
 }
-
 function todayQtyForEmployee(emp) {
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  return state.entries
-    .filter(e => e.employee === emp && new Date(e.createdAt).getTime() >= start)
+  const start = new Date(); start.setHours(0,0,0,0);
+  return state.entries.filter(e => e.employee === emp && new Date(e.createdAt) >= start)
     .reduce((s,e) => s + Number(e.quantity), 0);
 }
 
 // ─── LEVELS ─────────────────────────────────
 const LEVELS = [
-  { min: 0,    label: 'Новичок',    emoji: '🌱' },
-  { min: 100,  label: 'Стажёр',     emoji: '⚡' },
-  { min: 500,  label: 'Работник',   emoji: '💪' },
-  { min: 1500, label: 'Мастер',     emoji: '🔥' },
-  { min: 4000, label: 'Эксперт',    emoji: '⭐' },
-  { min: 8000, label: 'Легенда',    emoji: '🏆' },
+  { min:0,    label:'Новичок',  emoji:'🌱' },
+  { min:100,  label:'Стажёр',   emoji:'⚡' },
+  { min:500,  label:'Работник', emoji:'💪' },
+  { min:1500, label:'Мастер',   emoji:'🔥' },
+  { min:4000, label:'Эксперт',  emoji:'⭐' },
+  { min:8000, label:'Легенда',  emoji:'🏆' },
 ];
-
-function getLevel(totalQty) {
+function getLevel(qty) {
   let level = LEVELS[0];
-  for (const l of LEVELS) { if (totalQty >= l.min) level = l; }
+  for (const l of LEVELS) { if (qty >= l.min) level = l; }
   return level;
 }
-
 function empTotalQty(emp) {
   return state.entries.filter(e => e.employee === emp).reduce((s,e) => s + Number(e.quantity), 0);
 }
@@ -116,26 +223,19 @@ function empTotalQty(emp) {
 // ─── STREAKS ────────────────────────────────
 function updateStreak(emp) {
   const today = todayStr();
-  const s = state.streaks[emp] || { count: 0, lastDate: '' };
+  const s = state.streaks[emp] || { count:0, lastDate:'' };
   const yesterday = (() => {
     const d = new Date(); d.setDate(d.getDate()-1);
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   })();
-
-  if (s.lastDate === today) return; // already updated today
-  if (s.lastDate === yesterday) {
-    s.count += 1;
-  } else {
-    s.count = 1;
-  }
+  if (s.lastDate === today) return;
+  s.count = s.lastDate === yesterday ? s.count + 1 : 1;
   s.lastDate = today;
   state.streaks[emp] = s;
 }
-
 function getStreak(emp) {
   const s = state.streaks[emp];
   if (!s) return 0;
-  // If last date is not today or yesterday, streak is broken
   const today = todayStr();
   const yesterday = (() => {
     const d = new Date(); d.setDate(d.getDate()-1);
@@ -147,19 +247,16 @@ function getStreak(emp) {
 
 // ─── BADGES ─────────────────────────────────
 const BADGES = [
-  { id: 'first',    icon: '🎯', name: 'Первая запись',   desc: 'Добавь первую запись',         check: (emp) => state.entries.some(e => e.employee === emp) },
-  { id: 'century',  icon: '💯', name: '100 штук',        desc: 'Сделай 100 штук за всё время', check: (emp) => empTotalQty(emp) >= 100 },
-  { id: 'k500',     icon: '⭐', name: '500 штук',        desc: '500 штук за всё время',        check: (emp) => empTotalQty(emp) >= 500 },
-  { id: 'k1000',    icon: '🔥', name: '1000 штук',       desc: '1000 штук за всё время',       check: (emp) => empTotalQty(emp) >= 1000 },
-  { id: 'streak3',  icon: '⚡', name: '3 дня подряд',    desc: 'Стрик 3 дня',                  check: (emp) => getStreak(emp) >= 3 },
-  { id: 'streak7',  icon: '🌟', name: 'Неделя подряд',   desc: 'Стрик 7 дней',                 check: (emp) => getStreak(emp) >= 7 },
-  { id: 'goal',     icon: '🎉', name: 'Цель выполнена',  desc: 'Выполни дневную цель',         check: (emp) => { const g = state.goals[emp]; return g && todayQtyForEmployee(emp) >= g; } },
-  { id: 'speed',    icon: '🚀', name: 'Скорость',        desc: '50+ штук за один раз',         check: (emp) => state.entries.some(e => e.employee === emp && Number(e.quantity) >= 50) },
+  { id:'first',   icon:'🎯', name:'Первая запись',  desc:'Добавь первую запись',         check: emp => state.entries.some(e => e.employee === emp) },
+  { id:'century', icon:'💯', name:'100 штук',       desc:'100 штук за всё время',        check: emp => empTotalQty(emp) >= 100 },
+  { id:'k500',    icon:'⭐', name:'500 штук',       desc:'500 штук за всё время',        check: emp => empTotalQty(emp) >= 500 },
+  { id:'k1000',   icon:'🔥', name:'1000 штук',      desc:'1000 штук за всё время',       check: emp => empTotalQty(emp) >= 1000 },
+  { id:'streak3', icon:'⚡', name:'3 дня подряд',   desc:'Стрик 3 дня',                  check: emp => getStreak(emp) >= 3 },
+  { id:'streak7', icon:'🌟', name:'Неделя подряд',  desc:'Стрик 7 дней',                 check: emp => getStreak(emp) >= 7 },
+  { id:'goal',    icon:'🎉', name:'Цель выполнена', desc:'Выполни дневную цель',         check: emp => { const g = state.goals[emp]; return g && todayQtyForEmployee(emp) >= g; } },
+  { id:'speed',   icon:'🚀', name:'Скорость',       desc:'50+ штук за один раз',         check: emp => state.entries.some(e => e.employee === emp && Number(e.quantity) >= 50) },
 ];
-
-function getEarnedBadges(emp) {
-  return BADGES.filter(b => b.check(emp));
-}
+function getEarnedBadges(emp) { return BADGES.filter(b => b.check(emp)); }
 
 // ─── TABS ────────────────────────────────────
 const tabs    = document.querySelectorAll('.tab');
@@ -172,6 +269,7 @@ function switchTab(name) {
   if (name === 'history')    renderHistory();
   if (name === 'stats')      renderStats();
   if (name === 'motivation') renderMotivation();
+  if (name === 'report')     renderReport();
   if (name === 'settings')   renderSettings();
   updateTopbar();
 }
@@ -210,9 +308,9 @@ function buildSelect(id, items, placeholder='— выберите —') {
   const sel = document.getElementById(id);
   const cur = sel.value;
   sel.innerHTML = `<option value="">${placeholder}</option>`;
-  items.forEach(v => sel.insertAdjacentHTML('beforeend', `<option value="${esc(v)}"${v===cur?' selected':''}>${esc(v)}</option>`));
+  items.forEach(v => sel.insertAdjacentHTML('beforeend',
+    `<option value="${esc(v)}"${v===cur?' selected':''}>${esc(v)}</option>`));
 }
-
 function buildQuickBtns(containerId, items, inputId) {
   const c = document.getElementById(containerId);
   const inp = document.getElementById(inputId);
@@ -224,7 +322,6 @@ function buildQuickBtns(containerId, items, inputId) {
     c.appendChild(b);
   });
 }
-
 function refreshAddForm() {
   buildSelect('f-employee', state.employees, '— выберите сотрудника —');
   buildSelect('f-model',    state.models,    '— выберите модель —');
@@ -233,7 +330,6 @@ function refreshAddForm() {
 }
 refreshAddForm();
 
-// Employee widget + goal progress when employee selected
 document.getElementById('f-employee').addEventListener('change', () => {
   updateEmployeeWidget();
   updateGoalProgress();
@@ -244,13 +340,10 @@ function updateEmployeeWidget() {
   const emp = document.getElementById('f-employee').value;
   const widget = document.getElementById('employee-widget');
   if (!emp) { widget.classList.add('hidden'); return; }
-
   const total  = empTotalQty(emp);
   const level  = getLevel(total);
   const streak = getStreak(emp);
   const todayQ = todayQtyForEmployee(emp);
-  const initial = emp.charAt(0).toUpperCase();
-
   widget.classList.remove('hidden');
   widget.innerHTML = `
     <div class="ew-avatar">${level.emoji}</div>
@@ -266,46 +359,35 @@ function updateEmployeeWidget() {
       <div class="ew-streak-fire">🔥</div>
       <div class="ew-streak-val">${streak}</div>
       <div class="ew-streak-label">Стрик</div>
-    </div>
-  `;
+    </div>`;
 }
 
 function updateGoalProgress() {
-  const emp = document.getElementById('f-employee').value;
+  const emp  = document.getElementById('f-employee').value;
   const wrap = document.getElementById('goal-progress-wrap');
   if (!emp || !state.goals[emp]) { wrap.classList.add('hidden'); return; }
-
   const goal = Number(state.goals[emp]);
   const done = todayQtyForEmployee(emp);
-  const pct  = Math.min(100, Math.round(done / goal * 100));
-
+  const pct  = Math.min(100, Math.round(done/goal*100));
   wrap.classList.remove('hidden');
   document.getElementById('goal-progress-pct').textContent = pct + '%';
   document.getElementById('goal-progress-fill').style.width = pct + '%';
   document.getElementById('goal-progress-sub').textContent =
-    done >= goal
-      ? `✅ Цель выполнена! ${done} из ${goal} шт`
-      : `${done} из ${goal} шт — осталось ${goal - done} шт`;
-
-  // Change colour based on progress
+    done >= goal ? `✅ Цель выполнена! ${done} из ${goal} шт` : `${done} из ${goal} шт — осталось ${goal-done} шт`;
   const fill = document.getElementById('goal-progress-fill');
-  if (pct >= 100) fill.style.background = 'linear-gradient(90deg,#a8ff78,#78ffd6)';
-  else if (pct >= 60) fill.style.background = 'linear-gradient(90deg,#a8ff78,#e8ff47)';
-  else fill.style.background = 'linear-gradient(90deg,#e8ff47,#ff9f43)';
+  fill.style.background = pct>=100 ? 'linear-gradient(90deg,#a8ff78,#78ffd6)'
+    : pct>=60 ? 'linear-gradient(90deg,#a8ff78,#e8ff47)' : 'linear-gradient(90deg,#e8ff47,#ff9f43)';
 }
 
 function updateTop3Widget() {
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  const todayEntries = state.entries.filter(e => new Date(e.createdAt).getTime() >= start);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayEntries = state.entries.filter(e => new Date(e.createdAt) >= today);
   const top = groupSum(todayEntries, e => e.employee).slice(0,3);
   const widget = document.getElementById('top3-widget');
   if (!top.length) { widget.classList.add('hidden'); return; }
-
   const max = top[0][1];
   const colors = ['#ffd700','#c0c0c0','#cd7f32'];
   const ranks  = ['🥇','🥈','🥉'];
-
   widget.classList.remove('hidden');
   widget.innerHTML = `
     <div class="top3-title">⚡ Топ сегодня</div>
@@ -316,17 +398,15 @@ function updateTop3Widget() {
           <span class="top3-name">${esc(name)}</span>
           <div class="top3-bar-track"><div class="top3-bar-fill" style="width:${Math.round(qty/max*100)}%;background:${colors[i]}"></div></div>
           <span class="top3-qty">${qty}</span>
-        </div>
-      `).join('')}
-    </div>
-  `;
+        </div>`).join('')}
+    </div>`;
 }
 
-// Save button
 document.getElementById('btn-add-employee').addEventListener('click', async () => {
   const v = await openModal('Новый сотрудник', 'Имя сотрудника');
   if (v && !state.employees.includes(v)) {
-    state.employees.push(v); persist(); refreshAddForm();
+    state.employees.push(v);
+    persistLocal(); await fbSaveSettings(); refreshAddForm();
     document.getElementById('f-employee').value = v;
     updateEmployeeWidget(); updateGoalProgress();
   }
@@ -335,12 +415,13 @@ document.getElementById('btn-add-employee').addEventListener('click', async () =
 document.getElementById('btn-add-model').addEventListener('click', async () => {
   const v = await openModal('Новая модель', 'Название модели');
   if (v && !state.models.includes(v)) {
-    state.models.push(v); persist(); refreshAddForm();
+    state.models.push(v);
+    persistLocal(); await fbSaveSettings(); refreshAddForm();
     document.getElementById('f-model').value = v;
   }
 });
 
-document.getElementById('btn-save').addEventListener('click', () => {
+document.getElementById('btn-save').addEventListener('click', async () => {
   const employee = document.getElementById('f-employee').value.trim();
   const model    = document.getElementById('f-model').value.trim();
   const color    = document.getElementById('f-color').value.trim();
@@ -353,22 +434,20 @@ document.getElementById('btn-save').addEventListener('click', () => {
   if (!size)     { showToast('Укажите размер');      return; }
   if (!quantity || quantity < 1) { showToast('Укажите количество > 0'); return; }
 
-  // Check goal BEFORE adding
   const goalBefore = state.goals[employee] ? todayQtyForEmployee(employee) : null;
 
   const entry = { id:genId(), createdAt:new Date().toISOString(), employee, model, color, size, quantity, note };
-  state.entries.unshift(entry);
 
-  // Update streak
   updateStreak(employee);
-  persist();
-  updateTopbar();
+  persistLocal();
 
-  // Motivational messages
-  const msgs = ['✓ Сохранено! Отличная работа!', '✓ Записано! Так держать!', '✓ Готово! Продолжай в том же духе!', '✓ Супер! Ещё один шаг к цели!'];
-  showToast(msgs[Math.floor(Math.random() * msgs.length)]);
+  // Сохраняем в Firebase (onSnapshot автоматически обновит state.entries)
+  await fbSaveEntry(entry);
+  await fbSaveSettings();
 
-  // Check if goal just reached
+  const msgs = ['✓ Сохранено! Отличная работа!','✓ Записано! Так держать!','✓ Готово! Продолжай в том же духе!','✓ Супер! Ещё один шаг к цели!'];
+  showToast(msgs[Math.floor(Math.random()*msgs.length)]);
+
   if (goalBefore !== null) {
     const goalAfter = todayQtyForEmployee(employee);
     const goal = Number(state.goals[employee]);
@@ -378,18 +457,15 @@ document.getElementById('btn-save').addEventListener('click', () => {
     }
   }
 
-  // Clear qty and size only, keep employee and model
   document.getElementById('f-qty').value  = '';
   document.getElementById('f-size').value = '';
-
   updateEmployeeWidget();
   updateGoalProgress();
   updateTop3Widget();
 });
 
 document.getElementById('btn-clear').addEventListener('click', () => {
-  ['f-employee','f-model','f-color','f-size','f-qty','f-note']
-    .forEach(id => document.getElementById(id).value = '');
+  ['f-employee','f-model','f-color','f-size','f-qty','f-note'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('employee-widget').classList.add('hidden');
   document.getElementById('goal-progress-wrap').classList.add('hidden');
   document.getElementById('top3-widget').classList.add('hidden');
@@ -418,45 +494,31 @@ function showGoalDone(emp) {
 function launchConfetti() {
   const canvas = document.getElementById('confetti-canvas');
   const ctx = canvas.getContext('2d');
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
-
+  canvas.width = window.innerWidth; canvas.height = window.innerHeight;
   const pieces = [];
   const colors = ['#e8ff47','#a8ff78','#ff4757','#48dbfb','#c56cf0','#ff9f43','#ffd700'];
-
-  for (let i = 0; i < 120; i++) {
-    pieces.push({
-      x: Math.random() * canvas.width,
-      y: -10 - Math.random() * 100,
-      w: 6 + Math.random() * 8,
-      h: 4 + Math.random() * 6,
-      color: colors[Math.floor(Math.random() * colors.length)],
-      vx: (Math.random() - 0.5) * 4,
-      vy: 2 + Math.random() * 4,
-      rot: Math.random() * 360,
-      vrot: (Math.random() - 0.5) * 8,
-      opacity: 1
-    });
+  for (let i=0;i<120;i++) {
+    pieces.push({ x:Math.random()*canvas.width, y:-10-Math.random()*100,
+      w:6+Math.random()*8, h:4+Math.random()*6,
+      color:colors[Math.floor(Math.random()*colors.length)],
+      vx:(Math.random()-.5)*4, vy:2+Math.random()*4,
+      rot:Math.random()*360, vrot:(Math.random()-.5)*8, opacity:1 });
   }
-
   let frame;
   const animate = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
     let alive = false;
     for (const p of pieces) {
-      p.x += p.vx; p.y += p.vy; p.rot += p.vrot;
-      if (p.y > canvas.height * 0.6) p.opacity -= 0.025;
-      if (p.opacity > 0) { alive = true; }
-      ctx.save();
-      ctx.globalAlpha = Math.max(0, p.opacity);
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.rot * Math.PI / 180);
-      ctx.fillStyle = p.color;
-      ctx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+      p.x+=p.vx; p.y+=p.vy; p.rot+=p.vrot;
+      if (p.y > canvas.height*.6) p.opacity -= .025;
+      if (p.opacity > 0) alive = true;
+      ctx.save(); ctx.globalAlpha=Math.max(0,p.opacity);
+      ctx.translate(p.x,p.y); ctx.rotate(p.rot*Math.PI/180);
+      ctx.fillStyle=p.color; ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h);
       ctx.restore();
     }
     if (alive) frame = requestAnimationFrame(animate);
-    else ctx.clearRect(0, 0, canvas.width, canvas.height);
+    else ctx.clearRect(0,0,canvas.width,canvas.height);
   };
   if (frame) cancelAnimationFrame(frame);
   animate();
@@ -488,19 +550,17 @@ function renderHistory() {
   empSel.innerHTML   = '<option value="">Все сотрудники</option>';
   modelSel.innerHTML = '<option value="">Все модели</option>';
   sizeSel.innerHTML  = '<option value="">Все размеры</option>';
-
   state.employees.forEach(v => empSel.insertAdjacentHTML('beforeend',   `<option value="${esc(v)}">${esc(v)}</option>`));
   state.models.forEach(v    => modelSel.insertAdjacentHTML('beforeend', `<option value="${esc(v)}">${esc(v)}</option>`));
   [...new Set(state.entries.map(e => normalizeSize(e.size)).filter(Boolean))].sort()
     .forEach(v => sizeSel.insertAdjacentHTML('beforeend', `<option value="${esc(v)}">${esc(v)}</option>`));
-
   empSel.value = curEmp; modelSel.value = curModel; sizeSel.value = curSize;
 
   const list = filteredEntries();
+  const qty = totalQty(list);
   const uniqEmp  = new Set(list.map(e => e.employee)).size;
   const uniqMod  = new Set(list.map(e => e.model)).size;
   const uniqSize = new Set(list.map(e => normalizeSize(e.size))).size;
-  const qty = totalQty(list);
 
   document.getElementById('history-summary').innerHTML = `
     <div class="summary-card"><div class="summary-val">${list.length}</div><div class="summary-label">Записей</div></div>
@@ -508,15 +568,13 @@ function renderHistory() {
     <div class="summary-card"><div class="summary-val">${uniqEmp}</div><div class="summary-label">Сотрудн.</div></div>
     <div class="summary-card"><div class="summary-val">${uniqMod}</div><div class="summary-label">Моделей</div></div>
     <div class="summary-card"><div class="summary-val">${uniqSize}</div><div class="summary-label">Размеров</div></div>
-    <div class="summary-card"><div class="summary-val">${list.length ? Math.round(qty/list.length) : 0}</div><div class="summary-label">Ср./запись</div></div>
-  `;
+    <div class="summary-card"><div class="summary-val">${list.length?Math.round(qty/list.length):0}</div><div class="summary-label">Ср./запись</div></div>`;
 
   const container = document.getElementById('history-list');
   if (!list.length) {
-    container.innerHTML = `<div class="empty-state"><span class="empty-icon">📭</span>Нет записей по заданным фильтрам</div>`;
+    container.innerHTML = `<div class="empty-state"><span class="empty-icon">📭</span>Нет записей</div>`;
     return;
   }
-
   container.innerHTML = list.map(e => `
     <div class="entry-card">
       <div class="entry-main">
@@ -526,27 +584,25 @@ function renderHistory() {
         </div>
         <div class="entry-row2">
           <span class="entry-size">${esc(e.size)}</span>
-          ${e.color ? `<span class="entry-color">${esc(e.color)}</span>` : ''}
+          ${e.color?`<span class="entry-color">${esc(e.color)}</span>`:''}
           <span class="entry-qty">× ${e.quantity} шт</span>
         </div>
-        ${e.note ? `<div class="entry-note">${esc(e.note)}</div>` : ''}
+        ${e.note?`<div class="entry-note">${esc(e.note)}</div>`:''}
         <div class="entry-date">${fmt(e.createdAt)}</div>
       </div>
       <div><button class="btn-delete" data-id="${esc(e.id)}">✕</button></div>
-    </div>
-  `).join('');
+    </div>`).join('');
 
   container.querySelectorAll('.btn-delete').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       if (confirm('Удалить запись?')) {
-        state.entries = state.entries.filter(e => e.id !== btn.dataset.id);
-        persist(); updateTopbar(); renderHistory();
+        await fbDeleteEntry(btn.dataset.id);
       }
     });
   });
 }
 
-document.getElementById('h-search').addEventListener('input',   e => { state.historyFilters.search   = e.target.value; renderHistory(); });
+document.getElementById('h-search').addEventListener('input',        e => { state.historyFilters.search   = e.target.value; renderHistory(); });
 document.getElementById('h-filter-emp').addEventListener('change',   e => { state.historyFilters.employee = e.target.value; renderHistory(); });
 document.getElementById('h-filter-model').addEventListener('change', e => { state.historyFilters.model    = e.target.value; renderHistory(); });
 document.getElementById('h-filter-size').addEventListener('change',  e => { state.historyFilters.size     = e.target.value; renderHistory(); });
@@ -567,29 +623,29 @@ document.getElementById('btn-export-csv').addEventListener('click', () => {
   const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   downloadFile('warehouse-export.csv', csv, 'text/csv');
 });
-
 document.getElementById('btn-export-json').addEventListener('click', () => {
   downloadFile('warehouse-backup.json',
-    JSON.stringify({ entries:state.entries, employees:state.employees, models:state.models, colors:state.colors, sizes:state.sizes, goals:state.goals }, null, 2),
-    'application/json');
+    JSON.stringify({ entries:state.entries, employees:state.employees, models:state.models,
+      colors:state.colors, sizes:state.sizes, goals:state.goals }, null, 2), 'application/json');
 });
-
 document.getElementById('import-json').addEventListener('change', e => {
   const file = e.target.files[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => {
+  reader.onload = async ev => {
     try {
       const data = JSON.parse(ev.target.result);
       if (Array.isArray(data.entries)) {
         if (confirm(`Импортировать ${data.entries.length} записей?`)) {
           const existIds = new Set(state.entries.map(e => e.id));
-          data.entries.forEach(e => { if (!existIds.has(e.id)) state.entries.push(e); });
+          for (const entry of data.entries) {
+            if (!existIds.has(entry.id)) await fbSaveEntry(entry);
+          }
           if (data.employees) state.employees = [...new Set([...state.employees,...data.employees])];
           if (data.models)    state.models    = [...new Set([...state.models,...data.models])];
           if (data.colors)    state.colors    = [...new Set([...state.colors,...data.colors])];
           if (data.sizes)     state.sizes     = [...new Set([...state.sizes,...data.sizes])];
           if (data.goals)     Object.assign(state.goals, data.goals);
-          persist(); updateTopbar(); refreshAddForm(); renderHistory();
+          persistLocal(); await fbSaveSettings(); refreshAddForm();
           showToast('✓ Импорт выполнен');
         }
       }
@@ -598,49 +654,42 @@ document.getElementById('import-json').addEventListener('change', e => {
   };
   reader.readAsText(file);
 });
-
 function downloadFile(name, content, type) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([content],{type}));
-  a.download = name; a.click();
-  URL.revokeObjectURL(a.href);
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
 }
 
 // ─── STATS ───────────────────────────────────
 function renderStats() {
   const entries = periodFilter(state.entries, state.currentPeriod);
   const container = document.getElementById('stats-content');
-
   if (!entries.length) {
     container.innerHTML = `<div class="empty-state"><span class="empty-icon">📊</span>Нет данных за выбранный период</div>`;
     return;
   }
-
   const qty = totalQty(entries);
   const uniqEmp  = new Set(entries.map(e => e.employee)).size;
   const uniqMod  = new Set(entries.map(e => e.model)).size;
   const uniqSize = new Set(entries.map(e => normalizeSize(e.size))).size;
 
   function barList(data, maxVal) {
-    return data.map(([label, val]) => `
+    return data.map(([label,val]) => `
       <div class="bar-item">
         <div class="bar-label" title="${esc(label)}">${esc(label)}</div>
         <div class="bar-track"><div class="bar-fill" style="width:${Math.round(val/maxVal*100)}%"></div></div>
         <div class="bar-val">${val}</div>
       </div>`).join('');
   }
-
   const topEmp   = groupSum(entries, e => e.employee).slice(0,8);
   const topModel = groupSum(entries, e => e.model).slice(0,8);
   const topSizes = groupSum(entries, e => normalizeSize(e.size)).slice(0,15);
-
   const modelNames = [...new Set(entries.map(e => e.model))];
   const modelsSizeHtml = modelNames.map(modelName => {
     const me = entries.filter(e => e.model === modelName);
     const sizeMap = groupSum(me, e => normalizeSize(e.size));
-    const mt = totalQty(me);
     return `<div class="model-sizes-block">
-      <div class="model-sizes-header">${esc(modelName)} <span>итого ${mt} шт</span></div>
+      <div class="model-sizes-header">${esc(modelName)} <span>итого ${totalQty(me)} шт</span></div>
       <div class="size-chips">${sizeMap.map(([sz,qt]) => `
         <div class="size-chip">
           <div class="size-chip-size">${esc(sz)}</div>
@@ -649,15 +698,13 @@ function renderStats() {
     </div>`;
   }).join('<div class="model-divider"></div>');
 
-  // Chart
-  const days = 14;
-  const now = new Date();
+  const days = 14; const now = new Date();
   const dayData = [];
   for (let i=days-1;i>=0;i--) {
     const d = new Date(now.getFullYear(),now.getMonth(),now.getDate()-i);
     const next = new Date(d.getFullYear(),d.getMonth(),d.getDate()+1);
     const q = entries.filter(e => { const t=new Date(e.createdAt).getTime(); return t>=d.getTime()&&t<next.getTime(); })
-              .reduce((s,e)=>s+Number(e.quantity),0);
+      .reduce((s,e)=>s+Number(e.quantity),0);
     dayData.push({ label:fmtDate(d), qty:q });
   }
   const maxQ = Math.max(...dayData.map(d=>d.qty),1);
@@ -674,35 +721,23 @@ function renderStats() {
         <div class="stat-kpi"><div class="stat-kpi-val">${entries.length?Math.round(qty/entries.length):0}</div><div class="stat-kpi-label">Ср./запись</div></div>
       </div>
     </div>
-    <div class="stat-block">
-      <div class="stat-block-title">Топ сотрудников</div>
-      <div class="bar-list">${topEmp.length?barList(topEmp,topEmp[0][1]):'<div class="empty-state">Нет данных</div>'}</div>
-    </div>
-    <div class="stat-block">
-      <div class="stat-block-title">Топ моделей</div>
-      <div class="bar-list">${topModel.length?barList(topModel,topModel[0][1]):'<div class="empty-state">Нет данных</div>'}</div>
-    </div>
-    <div class="stat-block">
-      <div class="stat-block-title">🔥 Топ размеров</div>
-      <div class="bar-list">${topSizes.length?barList(topSizes,topSizes[0][1]):'<div class="empty-state">Нет данных</div>'}</div>
-    </div>
-    <div class="stat-block">
-      <div class="stat-block-title">Размеры по моделям</div>
-      ${modelsSizeHtml||'<div class="empty-state">Нет данных</div>'}
-    </div>
-    <div class="stat-block">
-      <div class="stat-block-title">Динамика — последние ${days} дней</div>
-      <div class="chart-wrap">
-        <div class="chart-canvas-area">
-          ${dayData.map(d=>`
-            <div class="chart-bar-wrap" title="${d.label}: ${d.qty} шт">
-              <div class="chart-bar" style="height:${Math.round(d.qty/maxQ*66)}px"></div>
-              <div class="chart-day-label">${d.label.split('.')[0]}</div>
-            </div>`).join('')}
-        </div>
-      </div>
-    </div>
-  `;
+    <div class="stat-block"><div class="stat-block-title">Топ сотрудников</div>
+      <div class="bar-list">${topEmp.length?barList(topEmp,topEmp[0][1]):'<div class="empty-state">Нет данных</div>'}</div></div>
+    <div class="stat-block"><div class="stat-block-title">Топ моделей</div>
+      <div class="bar-list">${topModel.length?barList(topModel,topModel[0][1]):'<div class="empty-state">Нет данных</div>'}</div></div>
+    <div class="stat-block"><div class="stat-block-title">🔥 Топ размеров</div>
+      <div class="bar-list">${topSizes.length?barList(topSizes,topSizes[0][1]):'<div class="empty-state">Нет данных</div>'}</div></div>
+    <div class="stat-block"><div class="stat-block-title">Размеры по моделям</div>
+      ${modelsSizeHtml||'<div class="empty-state">Нет данных</div>'}</div>
+    <div class="stat-block"><div class="stat-block-title">Динамика — последние ${days} дней</div>
+      <div class="chart-wrap"><div class="chart-canvas-area">
+        ${dayData.map(d=>`
+          <div class="chart-bar-wrap" title="${d.label}: ${d.qty} шт">
+            <div class="chart-bar" style="height:${Math.round(d.qty/maxQ*66)}px"></div>
+            <div class="chart-day-label">${d.label.split('.')[0]}</div>
+          </div>`).join('')}
+      </div></div>
+    </div>`;
 }
 
 document.querySelectorAll('.period-btn').forEach(btn => {
@@ -714,46 +749,35 @@ document.querySelectorAll('.period-btn').forEach(btn => {
   });
 });
 
-// ─── MOTIVATION SCREEN ───────────────────────
+// ─── MOTIVATION ──────────────────────────────
 function renderMotivation() {
   const container = document.getElementById('motivation-content');
   if (!state.employees.length) {
     container.innerHTML = `<div class="empty-state"><span class="empty-icon">🏆</span>Добавьте сотрудников в настройках</div>`;
     return;
   }
-
-  // Leaderboard data (all time)
   const lb = state.employees.map(emp => ({
-    emp,
-    qty:    empTotalQty(emp),
-    streak: getStreak(emp),
-    level:  getLevel(empTotalQty(emp)),
-    badges: getEarnedBadges(emp),
-    todayQ: todayQtyForEmployee(emp)
-  })).sort((a,b) => b.qty - a.qty);
+    emp, qty:empTotalQty(emp), streak:getStreak(emp),
+    level:getLevel(empTotalQty(emp)), badges:getEarnedBadges(emp), todayQ:todayQtyForEmployee(emp)
+  })).sort((a,b) => b.qty-a.qty);
 
-  // Podium (top 3)
-  const podiumOrder = [lb[1], lb[0], lb[2]].filter(Boolean); // 2nd, 1st, 3rd visual order
+  const podiumOrder = [lb[1],lb[0],lb[2]].filter(Boolean);
   const podiumClasses = ['p2','p1','p3'];
-  const podiumEmojis  = ['🥈','🥇','🥉'];
 
   const podiumHtml = `
     <div class="motiv-hero">
       <div class="motiv-hero-title">🏆 Рейтинг сотрудников</div>
       <div class="motiv-podium">
-        ${podiumOrder.map((item,i) => item ? `
+        ${podiumOrder.map((item,i) => `
           <div class="podium-item ${podiumClasses[i]}">
             <div class="podium-qty">${item.qty}</div>
             <div class="podium-avatar">${item.level.emoji}</div>
             <div class="podium-name">${esc(item.emp)}</div>
             <div class="podium-block"></div>
-          </div>
-        ` : '').join('')}
+          </div>`).join('')}
       </div>
-    </div>
-  `;
+    </div>`;
 
-  // Full leaderboard
   const lbHtml = `
     <div class="stat-block">
       <div class="stat-block-title">Полный рейтинг — все время</div>
@@ -764,19 +788,16 @@ function renderMotivation() {
             <div class="lb-avatar">${item.level.emoji}</div>
             <div class="lb-info">
               <div class="lb-name">${esc(item.emp)}</div>
-              <div class="lb-level">${item.level.label}${item.badges.length ? ' · ' + item.badges.slice(0,3).map(b=>b.icon).join('') : ''}</div>
+              <div class="lb-level">${item.level.label}${item.badges.length?' · '+item.badges.slice(0,3).map(b=>b.icon).join(''):''}</div>
             </div>
             <div class="lb-right">
               <div class="lb-qty">${item.qty}</div>
-              ${item.streak > 0 ? `<div class="lb-streak">🔥 ${item.streak} дн</div>` : ''}
+              ${item.streak>0?`<div class="lb-streak">🔥 ${item.streak} дн</div>`:''}
             </div>
-          </div>
-        `).join('')}
+          </div>`).join('')}
       </div>
-    </div>
-  `;
+    </div>`;
 
-  // Today's goals
   const goalsHtml = state.employees.some(e => state.goals[e]) ? `
     <div class="stat-block">
       <div class="stat-block-title">🎯 Цели на сегодня</div>
@@ -785,37 +806,25 @@ function renderMotivation() {
           const goal = Number(state.goals[emp]);
           const done = todayQtyForEmployee(emp);
           const pct  = Math.min(100, Math.round(done/goal*100));
-          const color = pct>=100 ? '#a8ff78' : pct>=60 ? '#e8ff47' : '#ff9f43';
-          return `
-            <div class="goal-card">
-              <div class="goal-card-header">
-                <span class="goal-card-name">${esc(emp)} ${pct>=100?'✅':''}</span>
-                <span class="goal-card-pct" style="color:${color}">${pct}%</span>
-              </div>
-              <div class="goal-card-track">
-                <div class="goal-card-fill" style="width:${pct}%;background:${color}"></div>
-              </div>
-              <div class="goal-card-sub">${done} из ${goal} шт${done<goal ? ` — осталось ${goal-done}` : ' — ВЫПОЛНЕНО!'}</div>
-            </div>`;
+          const color = pct>=100?'#a8ff78':pct>=60?'#e8ff47':'#ff9f43';
+          return `<div class="goal-card">
+            <div class="goal-card-header">
+              <span class="goal-card-name">${esc(emp)} ${pct>=100?'✅':''}</span>
+              <span class="goal-card-pct" style="color:${color}">${pct}%</span>
+            </div>
+            <div class="goal-card-track"><div class="goal-card-fill" style="width:${pct}%;background:${color}"></div></div>
+            <div class="goal-card-sub">${done} из ${goal} шт${done<goal?` — осталось ${goal-done}`:' — ВЫПОЛНЕНО!'}</div>
+          </div>`;
         }).join('')}
       </div>
-    </div>
-  ` : '';
+    </div>` : '';
 
-  // Records
   const allEntries = state.entries;
-  let bestDay = 0, bestDayDate = '', bestEntry = null;
-
+  let bestDay=0, bestDayDate='', bestEntry=null;
   if (allEntries.length) {
-    // Best single entry
-    bestEntry = allEntries.reduce((b,e) => Number(e.quantity) > Number(b.quantity) ? e : b, allEntries[0]);
-
-    // Best day
+    bestEntry = allEntries.reduce((b,e) => Number(e.quantity)>Number(b.quantity)?e:b, allEntries[0]);
     const byDay = {};
-    allEntries.forEach(e => {
-      const d = e.createdAt.slice(0,10);
-      byDay[d] = (byDay[d]||0) + Number(e.quantity);
-    });
+    allEntries.forEach(e => { const d=e.createdAt.slice(0,10); byDay[d]=(byDay[d]||0)+Number(e.quantity); });
     for (const [d,q] of Object.entries(byDay)) { if (q>bestDay) { bestDay=q; bestDayDate=d; } }
   }
 
@@ -823,59 +832,159 @@ function renderMotivation() {
     <div class="stat-block">
       <div class="stat-block-title">🌟 Рекорды</div>
       <div class="records-grid">
-        <div class="record-card">
-          <div class="record-icon">📅</div>
-          <div class="record-val">${bestDay}</div>
-          <div class="record-label">Лучший день</div>
-          <div class="record-sub">${bestDayDate || '—'}</div>
-        </div>
-        <div class="record-card">
-          <div class="record-icon">⚡</div>
-          <div class="record-val">${bestEntry ? bestEntry.quantity : 0}</div>
-          <div class="record-label">Макс. за раз</div>
-          <div class="record-sub">${bestEntry ? esc(bestEntry.employee) : '—'}</div>
-        </div>
-        <div class="record-card">
-          <div class="record-icon">🔥</div>
-          <div class="record-val">${lb.length ? Math.max(...lb.map(x=>x.streak)) : 0}</div>
-          <div class="record-label">Макс. стрик</div>
-          <div class="record-sub">дней подряд</div>
-        </div>
-        <div class="record-card">
-          <div class="record-icon">👥</div>
-          <div class="record-val">${state.employees.length}</div>
-          <div class="record-label">Сотрудников</div>
-          <div class="record-sub">в команде</div>
-        </div>
+        <div class="record-card"><div class="record-icon">📅</div><div class="record-val">${bestDay}</div><div class="record-label">Лучший день</div><div class="record-sub">${bestDayDate||'—'}</div></div>
+        <div class="record-card"><div class="record-icon">⚡</div><div class="record-val">${bestEntry?bestEntry.quantity:0}</div><div class="record-label">Макс. за раз</div><div class="record-sub">${bestEntry?esc(bestEntry.employee):'—'}</div></div>
+        <div class="record-card"><div class="record-icon">🔥</div><div class="record-val">${lb.length?Math.max(...lb.map(x=>x.streak)):0}</div><div class="record-label">Макс. стрик</div><div class="record-sub">дней подряд</div></div>
+        <div class="record-card"><div class="record-icon">👥</div><div class="record-val">${state.employees.length}</div><div class="record-label">Сотрудников</div><div class="record-sub">в команде</div></div>
       </div>
-    </div>
-  `;
+    </div>`;
 
-  // Badges per employee
   const badgesHtml = lb.map(item => {
-    const earned = getEarnedBadges(item.emp);
-    const allBadges = BADGES.map(b => ({
-      ...b,
-      isEarned: earned.some(e => e.id === b.id)
-    }));
-    return `
-      <div class="stat-block">
-        <div class="stat-block-title">${item.level.emoji} ${esc(item.emp)} — Достижения</div>
-        <div class="badges-grid">
-          ${allBadges.map(b => `
-            <div class="badge-item ${b.isEarned?'earned':'locked'}">
-              <div class="badge-icon">${b.icon}</div>
-              <div class="badge-info">
-                <div class="badge-name">${b.name}</div>
-                <div class="badge-desc">${b.desc}</div>
-              </div>
-            </div>`).join('')}
-        </div>
-      </div>`;
+    const allBadges = BADGES.map(b => ({ ...b, isEarned: getEarnedBadges(item.emp).some(e=>e.id===b.id) }));
+    return `<div class="stat-block">
+      <div class="stat-block-title">${item.level.emoji} ${esc(item.emp)} — Достижения</div>
+      <div class="badges-grid">
+        ${allBadges.map(b => `
+          <div class="badge-item ${b.isEarned?'earned':'locked'}">
+            <div class="badge-icon">${b.icon}</div>
+            <div class="badge-info"><div class="badge-name">${b.name}</div><div class="badge-desc">${b.desc}</div></div>
+          </div>`).join('')}
+      </div>
+    </div>`;
   }).join('');
 
   container.innerHTML = podiumHtml + lbHtml + goalsHtml + recordsHtml + badgesHtml;
 }
+
+// ─── REPORT ──────────────────────────────────
+const DAYS_OF_WEEK = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+let reportFilters = { employee:'', model:'', from:'', to:'' };
+
+function reportFilteredEntries() {
+  let list = [...state.entries];
+  if (reportFilters.employee) list = list.filter(e => e.employee === reportFilters.employee);
+  if (reportFilters.model)    list = list.filter(e => e.model    === reportFilters.model);
+  if (reportFilters.from) { const f=new Date(reportFilters.from).getTime(); list=list.filter(e=>new Date(e.createdAt).getTime()>=f); }
+  if (reportFilters.to)   { const t=new Date(reportFilters.to).getTime()+86400000; list=list.filter(e=>new Date(e.createdAt).getTime()<t); }
+  return list;
+}
+
+function renderReport() {
+  const empSel   = document.getElementById('r-filter-emp');
+  const modelSel = document.getElementById('r-filter-model');
+  const curEmp = empSel.value, curModel = modelSel.value;
+  empSel.innerHTML   = '<option value="">Все сотрудники</option>';
+  modelSel.innerHTML = '<option value="">Все модели</option>';
+  state.employees.forEach(v => empSel.insertAdjacentHTML('beforeend',   `<option value="${esc(v)}">${esc(v)}</option>`));
+  state.models.forEach(v    => modelSel.insertAdjacentHTML('beforeend', `<option value="${esc(v)}">${esc(v)}</option>`));
+  empSel.value = curEmp; modelSel.value = curModel;
+
+  const list = reportFilteredEntries();
+  const totalQ   = totalQty(list);
+  const uniqDays = new Set(list.map(e => e.createdAt.slice(0,10))).size;
+  const uniqEmps = new Set(list.map(e => e.employee)).size;
+
+  document.getElementById('report-summary').innerHTML = `
+    <div class="summary-card"><div class="summary-val">${uniqDays}</div><div class="summary-label">Дней</div></div>
+    <div class="summary-card"><div class="summary-val">${totalQ}</div><div class="summary-label">Всего шт</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqEmps}</div><div class="summary-label">Сотрудн.</div></div>
+    <div class="summary-card"><div class="summary-val">${list.length}</div><div class="summary-label">Записей</div></div>
+    <div class="summary-card"><div class="summary-val">${uniqDays?Math.round(totalQ/uniqDays):0}</div><div class="summary-label">Ср./день</div></div>
+    <div class="summary-card"><div class="summary-val">${list.length?Math.round(totalQ/list.length):0}</div><div class="summary-label">Ср./запись</div></div>`;
+
+  const container = document.getElementById('report-days-list');
+  if (!list.length) {
+    container.innerHTML = `<div class="empty-state"><span class="empty-icon">📅</span>Нет данных за выбранный период</div>`;
+    return;
+  }
+
+  const byDate = new Map();
+  for (const entry of list) {
+    const day = entry.createdAt.slice(0,10);
+    if (!byDate.has(day)) byDate.set(day, []);
+    byDate.get(day).push(entry);
+  }
+  const sortedDates = [...byDate.keys()].sort((a,b) => b.localeCompare(a));
+
+  container.innerHTML = sortedDates.map(date => {
+    const dayEntries = byDate.get(date);
+    const dayTotal   = totalQty(dayEntries);
+    const dayDate    = new Date(date+'T00:00:00');
+    const dow        = DAYS_OF_WEEK[dayDate.getDay()];
+    const dateLabel  = dayDate.toLocaleDateString('ru', { day:'2-digit', month:'long' });
+    const uniqEmpsDay = new Set(dayEntries.map(e => e.employee)).size;
+
+    const byEmp = new Map();
+    for (const entry of dayEntries) {
+      if (!byEmp.has(entry.employee)) byEmp.set(entry.employee, []);
+      byEmp.get(entry.employee).push(entry);
+    }
+    const sortedEmps = [...byEmp.entries()].sort((a,b) => totalQty(b[1])-totalQty(a[1]));
+
+    const empSections = sortedEmps.map(([empName, empEntries]) => {
+      const empTotal = totalQty(empEntries);
+      const byModel = new Map();
+      for (const entry of empEntries) {
+        if (!byModel.has(entry.model)) byModel.set(entry.model, []);
+        byModel.get(entry.model).push(entry);
+      }
+      const modelRows = [...byModel.entries()].map(([modelName, modelEntries]) => {
+        const sizeMap = groupSum(modelEntries, e => normalizeSize(e.size));
+        return `<div class="report-model-row">
+          <span class="report-model-name">${esc(modelName)}</span>
+          <div class="report-model-sizes">
+            ${sizeMap.map(([sz,qt]) => `
+              <div class="report-size-tag">
+                <span class="report-size-tag-size">${esc(sz)}</span>
+                <span class="report-size-tag-qty">×${qt}</span>
+              </div>`).join('')}
+          </div>
+        </div>`;
+      }).join('');
+      return `<div class="report-emp-section">
+        <div class="report-emp-header">
+          <div class="report-emp-name">${getLevel(empTotalQty(empName)).emoji} ${esc(empName)}</div>
+          <div class="report-emp-qty">${empTotal} шт</div>
+        </div>
+        ${modelRows}
+      </div>`;
+    }).join('');
+
+    return `<div class="report-day-block" data-date="${date}">
+      <div class="report-day-header">
+        <div class="report-day-title"><span>${dateLabel}</span><span class="report-day-dow">${dow}</span></div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div><div class="report-day-total">${dayTotal} шт</div><div class="report-day-meta">${uniqEmpsDay} сотр · ${dayEntries.length} зап</div></div>
+          <span class="report-day-chevron">▼</span>
+        </div>
+      </div>
+      <div class="report-day-body">${empSections}</div>
+    </div>`;
+  }).join('');
+
+  container.querySelectorAll('.report-day-header').forEach(header => {
+    header.addEventListener('click', () => header.closest('.report-day-block').classList.toggle('open'));
+  });
+  const todayBlock = container.querySelector(`[data-date="${todayStr()}"]`);
+  if (todayBlock) todayBlock.classList.add('open');
+}
+
+document.getElementById('r-filter-emp').addEventListener('change',   e => { reportFilters.employee = e.target.value; renderReport(); });
+document.getElementById('r-filter-model').addEventListener('change', e => { reportFilters.model    = e.target.value; renderReport(); });
+document.getElementById('r-date-from').addEventListener('change',    e => { reportFilters.from     = e.target.value; renderReport(); });
+document.getElementById('r-date-to').addEventListener('change',      e => { reportFilters.to       = e.target.value; renderReport(); });
+document.getElementById('btn-reset-report').addEventListener('click', () => {
+  reportFilters = { employee:'', model:'', from:'', to:'' };
+  ['r-filter-emp','r-filter-model','r-date-from','r-date-to'].forEach(id => document.getElementById(id).value = '');
+  renderReport();
+});
+document.getElementById('btn-export-report-csv').addEventListener('click', () => {
+  const list = reportFilteredEntries();
+  const rows = [['Дата','День недели','Сотрудник','Модель','Цвет','Размер','Количество','Комментарий']];
+  list.forEach(e => { const d=new Date(e.createdAt); rows.push([e.createdAt.slice(0,10),DAYS_OF_WEEK[d.getDay()],e.employee,e.model,e.color,e.size,e.quantity,e.note]); });
+  const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  downloadFile('report-by-days.csv', csv, 'text/csv');
+});
 
 // ─── SETTINGS ────────────────────────────────
 function renderSettings() {
@@ -885,92 +994,73 @@ function renderSettings() {
   renderTagEditor('models-editor',    state.models,    'models');
   renderGoalsEditor();
 }
-
 function renderTagEditor(containerId, arr, key) {
   const c = document.getElementById(containerId);
   c.innerHTML = arr.map((v,i) => `
-    <div class="tag-item">
-      <span>${esc(v)}</span>
+    <div class="tag-item"><span>${esc(v)}</span>
       <button class="tag-remove" data-key="${key}" data-idx="${i}">×</button>
     </div>`).join('');
   c.querySelectorAll('.tag-remove').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       state[btn.dataset.key].splice(parseInt(btn.dataset.idx,10),1);
-      persist(); refreshAddForm();
+      persistLocal(); await fbSaveSettings(); refreshAddForm();
       renderTagEditor(containerId, state[btn.dataset.key], btn.dataset.key);
     });
   });
 }
-
 function renderGoalsEditor() {
   const c = document.getElementById('goals-editor');
-  if (!state.employees.length) {
-    c.innerHTML = '<div style="color:var(--muted);font-size:12px">Сначала добавьте сотрудников</div>';
-    return;
-  }
+  if (!state.employees.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px">Сначала добавьте сотрудников</div>'; return; }
   c.innerHTML = state.employees.map(emp => `
     <div class="goal-row">
       <span class="goal-row-name">${esc(emp)}</span>
-      <input type="number" class="form-control goal-row input" data-emp="${esc(emp)}"
-        placeholder="норма/день" min="1" inputmode="numeric"
-        value="${state.goals[emp] || ''}" />
-    </div>
-  `).join('');
-
+      <input type="number" class="form-control" data-emp="${esc(emp)}"
+        placeholder="норма/день" min="1" inputmode="numeric" value="${state.goals[emp]||''}" />
+    </div>`).join('');
   c.querySelectorAll('input[data-emp]').forEach(inp => {
-    inp.addEventListener('change', () => {
-      const v = parseInt(inp.value, 10);
-      if (v > 0) state.goals[inp.dataset.emp] = v;
-      else delete state.goals[inp.dataset.emp];
-      persist();
+    inp.addEventListener('change', async () => {
+      const v = parseInt(inp.value,10);
+      if (v>0) state.goals[inp.dataset.emp]=v; else delete state.goals[inp.dataset.emp];
+      persistLocal(); await fbSaveSettings();
     });
   });
 }
-
 function addTagFromInput(inputId, stateKey, editorId) {
   const inp = document.getElementById(inputId);
   const v = inp.value.trim(); if (!v) return;
   if (!state[stateKey].includes(v)) {
-    state[stateKey].push(v); persist(); refreshAddForm();
+    state[stateKey].push(v); persistLocal(); fbSaveSettings(); refreshAddForm();
     renderTagEditor(editorId, state[stateKey], stateKey);
-    if (stateKey === 'employees') renderGoalsEditor();
+    if (stateKey==='employees') renderGoalsEditor();
   }
   inp.value = '';
 }
-
-document.getElementById('btn-add-color').addEventListener('click',       () => addTagFromInput('new-color','colors','colors-editor'));
-document.getElementById('btn-add-size').addEventListener('click',        () => addTagFromInput('new-size','sizes','sizes-editor'));
-document.getElementById('btn-add-employee-s').addEventListener('click',  () => addTagFromInput('new-employee','employees','employees-editor'));
-document.getElementById('btn-add-model-s').addEventListener('click',     () => addTagFromInput('new-model','models','models-editor'));
-
+document.getElementById('btn-add-color').addEventListener('click',      () => addTagFromInput('new-color','colors','colors-editor'));
+document.getElementById('btn-add-size').addEventListener('click',       () => addTagFromInput('new-size','sizes','sizes-editor'));
+document.getElementById('btn-add-employee-s').addEventListener('click', () => addTagFromInput('new-employee','employees','employees-editor'));
+document.getElementById('btn-add-model-s').addEventListener('click',    () => addTagFromInput('new-model','models','models-editor'));
 ['new-color','new-size','new-employee','new-model'].forEach(id => {
   document.getElementById(id).addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
-    const map = {
-      'new-color':    ['colors','colors-editor'],
-      'new-size':     ['sizes','sizes-editor'],
-      'new-employee': ['employees','employees-editor'],
-      'new-model':    ['models','models-editor']
-    };
-    const [k, editor] = map[id];
-    addTagFromInput(id, k, editor);
+    if (e.key!=='Enter') return;
+    const map = { 'new-color':['colors','colors-editor'], 'new-size':['sizes','sizes-editor'],
+      'new-employee':['employees','employees-editor'], 'new-model':['models','models-editor'] };
+    const [k,editor] = map[id]; addTagFromInput(id,k,editor);
   });
 });
-
-document.getElementById('btn-clear-all').addEventListener('click', () => {
+document.getElementById('btn-clear-all').addEventListener('click', async () => {
   if (confirm(`Удалить ВСЕ ${state.entries.length} записей? Это необратимо.`)) {
-    state.entries = []; persist(); updateTopbar(); showToast('Все записи удалены');
+    for (const e of state.entries) await fbDeleteEntry(e.id);
+    showToast('Все записи удалены');
   }
 });
 
-// ─── PWA INSTALL ─────────────────────────────
+// ─── PWA ─────────────────────────────────────
 let deferredPrompt = null;
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault(); deferredPrompt = e;
   const banner = document.createElement('div');
   banner.className = 'install-banner';
-  banner.innerHTML = `
-    <span>📦 Установить приложение</span>
+  banner.innerHTML = `<span>📦 Установить приложение</span>
     <div class="install-banner-btns">
       <button class="banner-btn" id="banner-install">Установить</button>
       <button class="banner-btn" id="banner-dismiss">✕</button>
@@ -990,3 +1080,5 @@ if ('serviceWorker' in navigator) {
 // ─── INIT ─────────────────────────────────────
 updateTopbar();
 updateTop3Widget();
+subscribeEntries();
+subscribeSettings();
